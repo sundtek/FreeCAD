@@ -76,24 +76,26 @@ const App::PropertyAngle::Constraints Helix::floatAngle = { -89.0, 89.0, 1.0 };
 Helix::Helix()
 {
     addSubType = FeatureAddSub::Additive;
+    auto initialMode = HelixMode::pitch_height_angle;
 
     const char* group = "Helix";
     ADD_PROPERTY_TYPE(Base, (Base::Vector3d(0.0, 0.0, 0.0)), group, App::Prop_ReadOnly,
-        "The center point of the helix' start.");
+        "The center point of the helix' start; derived from the reference axis.");
     ADD_PROPERTY_TYPE(Axis, (Base::Vector3d(0.0, 1.0, 0.0)), group, App::Prop_ReadOnly,
-        "The helix' direction.");
-    ADD_PROPERTY_TYPE(Pitch, (10.), group, App::Prop_None,
+        "The helix' direction; derived from the reference axis.");
+    ADD_PROPERTY_TYPE(ReferenceAxis, (0), group, App::Prop_None,
+        "The reference axis of the helix.");
+    ADD_PROPERTY_TYPE(Mode, (unsigned int(initialMode)), group, App::Prop_None,
+        "The helix input mode specifies which properties are set by the user.\n"
+        "Dependent properties are then calculated.");
+    Mode.setEnums(ModeEnums);
+    ADD_PROPERTY_TYPE(Pitch, (10.0), group, App::Prop_None,
         "The axial distance between two turns.");
     ADD_PROPERTY_TYPE(Height, (30.0), group, App::Prop_None,
         "The height of the helix' path, not accounting for the extent of the profile.");
     ADD_PROPERTY_TYPE(Turns, (3.0), group, App::Prop_None,
         "The number of turns in the helix.");
     Turns.setConstraints(&floatTurns);
-    ADD_PROPERTY_TYPE(LeftHanded, (long(0)), group, App::Prop_None,
-        "Sets the turning direction to left handed,\n"
-        "i.e. counter-clockwise when moving along its axis.");
-    ADD_PROPERTY_TYPE(Reversed, (long(0)), group, App::Prop_None,
-        "Determines whether the helix points in the opposite direction of the axis.");
     ADD_PROPERTY_TYPE(Angle, (0.0), group, App::Prop_None,
         "The angle of the cone that forms a hull around the helix.\n"
         "Non-zero values turn the helix into a conical spiral.\n"
@@ -102,17 +104,18 @@ Helix::Helix()
     ADD_PROPERTY_TYPE(Growth, (0.0), group, App::Prop_None,
         "The growth of the helix' radius per turn.\n"
         "Non-zero values turn the helix into a conical spiral.");
-    ADD_PROPERTY_TYPE(ReferenceAxis, (0), group, App::Prop_None,
-        "The reference axis of the helix.");
-    ADD_PROPERTY_TYPE(Mode, (long(0)), group, App::Prop_None,
-        "The helix input mode specifies which properties are set by the user.\n"
-        "Dependent properties are then calculated.");
-    Mode.setEnums(ModeEnums);
-    ADD_PROPERTY_TYPE(Outside, (long(0)), group, App::Prop_None,
+    ADD_PROPERTY_TYPE(LeftHanded, (false), group, App::Prop_None,
+        "Sets the turning direction to left handed,\n"
+        "i.e. counter-clockwise when moving along its axis.");
+    ADD_PROPERTY_TYPE(Reversed, (false), group, App::Prop_None,
+        "Determines whether the helix points in the opposite direction of the axis.");
+    ADD_PROPERTY_TYPE(Outside, (false), group, App::Prop_None,
         "If set, the result will be the intersection of the profile and the preexisting body.");
-    ADD_PROPERTY_TYPE(HasBeenEdited, (long(0)), group, App::Prop_None,
+    ADD_PROPERTY_TYPE(HasBeenEdited, (false), group, App::Prop_Hidden,
         "If false, the tool will propose an initial value for the pitch based on the profile bounding box,\n"
         "so that self intersection is avoided.");
+
+    setReadWriteStatusForMode(initialMode);
 }
 
 short Helix::mustExecute() const
@@ -136,6 +139,7 @@ App::DocumentObjectExecReturn* Helix::execute(void)
         if (Height.getValue() < Precision::Confusion())
             return new App::DocumentObjectExecReturn("Error: height too small!");
         Turns.setValue(Height.getValue() / Pitch.getValue());
+        Growth.setValue(Pitch.getValue() * tan(Base::toRadians(Angle.getValue())));
     }
     else if (mode == HelixMode::pitch_turns_angle) {
         if (Pitch.getValue() < Precision::Confusion())
@@ -143,6 +147,7 @@ App::DocumentObjectExecReturn* Helix::execute(void)
         if (Turns.getValue() < Precision::Confusion())
             return new App::DocumentObjectExecReturn("Error: turns too small!");
         Height.setValue(Turns.getValue() * Pitch.getValue());
+        Growth.setValue(Pitch.getValue() * tan(Base::toRadians(Angle.getValue())));
     }
     else if (mode == HelixMode::height_turns_angle) {
         if (Height.getValue() < Precision::Confusion())
@@ -150,6 +155,7 @@ App::DocumentObjectExecReturn* Helix::execute(void)
         if (Turns.getValue() < Precision::Confusion())
             return new App::DocumentObjectExecReturn("Error: turns too small!");
         Pitch.setValue(Height.getValue() / Turns.getValue());
+        Growth.setValue(Pitch.getValue() * tan(Base::toRadians(Angle.getValue())));
     }
     else if (mode == HelixMode::height_turns_growth) {
         if (Turns.getValue() < Precision::Confusion())
@@ -158,6 +164,16 @@ App::DocumentObjectExecReturn* Helix::execute(void)
             && (abs(Growth.getValue()) < Precision::Confusion()))
             return new App::DocumentObjectExecReturn("Error: either height or growth must not be zero!");
         Pitch.setValue(Height.getValue() / Turns.getValue());
+        if (Height.getValue() > 0) {
+            Angle.setValue(Base::toDegrees(atan(
+                Turns.getValue() * Growth.getValue() / Height.getValue())));
+        }
+        else {
+            // On purpose, we're doing nothing here; the else-branch is just for this comment.
+            // - we don't print a warning, as for a flat spiral a zero-height is perfectly fine
+            // - we don't void the angle (somehow) so that it keeps its value. This allows in
+            //   interactive usage to just go back to another mode and everything keeps working
+        }
     }
     else {
         return new App::DocumentObjectExecReturn("Error: unsupported mode");
@@ -503,7 +519,7 @@ double Helix::safePitch()
     if (startVec.Length() < Precision::Confusion()) {
         // when not in growth mode any pitch > 0 is safe
         if (mode != HelixMode::height_turns_growth) {
-                return Precision::Confusion();
+            return Precision::Confusion();
         }
         // if growth is not zero, there will in many cases be intersections
         // when the turn is >= 1, thus return an 'infinite' pitch
@@ -606,12 +622,79 @@ void Helix::handleChangedPropertyType(Base::XMLReader& reader, const char* TypeN
     }
 }
 
+void Helix::onChanged(const App::Property* prop)
+{
+    if (prop == &Mode) {
+        // Depending on the mode, the derived properties are set read-only
+        auto inputMode = static_cast<HelixMode>(Mode.getValue());
+        setReadWriteStatusForMode(inputMode);
+    }
+
+    ProfileBased::onChanged(prop);
+}
+
+void Helix::setReadWriteStatusForMode(HelixMode inputMode)
+{
+    switch (inputMode)
+    {
+    case HelixMode::pitch_height_angle:
+        // primary input:
+        Pitch.setStatus(App::Property::ReadOnly, false);
+        Height.setStatus(App::Property::ReadOnly, false);
+        Angle.setStatus(App::Property::ReadOnly, false);
+        // derived props:
+        Turns.setStatus(App::Property::ReadOnly, true);
+        Growth.setStatus(App::Property::ReadOnly, true);
+        break;
+
+    case HelixMode::pitch_turns_angle:
+        // primary input:
+        Pitch.setStatus(App::Property::ReadOnly, false);
+        Turns.setStatus(App::Property::ReadOnly, false);
+        Angle.setStatus(App::Property::ReadOnly, false);
+        // derived props:
+        Height.setStatus(App::Property::ReadOnly, true);
+        Growth.setStatus(App::Property::ReadOnly, true);
+        break;
+
+    case HelixMode::height_turns_angle:
+        // primary input:
+        Height.setStatus(App::Property::ReadOnly, false);
+        Turns.setStatus(App::Property::ReadOnly, false);
+        Angle.setStatus(App::Property::ReadOnly, false);
+        // derived props:
+        Pitch.setStatus(App::Property::ReadOnly, true);
+        Growth.setStatus(App::Property::ReadOnly, true);
+        break;
+
+    case HelixMode::height_turns_growth:
+        // primary input:
+        Height.setStatus(App::Property::ReadOnly, false);
+        Turns.setStatus(App::Property::ReadOnly, false);
+        Growth.setStatus(App::Property::ReadOnly, false);
+        // derived props:
+        Pitch.setStatus(App::Property::ReadOnly, true);
+        Angle.setStatus(App::Property::ReadOnly, true);
+        break;
+
+    default:
+        Pitch.setStatus(App::Property::ReadOnly, false);
+        Height.setStatus(App::Property::ReadOnly, false);
+        Turns.setStatus(App::Property::ReadOnly, false);
+        Angle.setStatus(App::Property::ReadOnly, false);
+        Growth.setStatus(App::Property::ReadOnly, false);
+        break;
+    }
+}
+
 PROPERTY_SOURCE(PartDesign::AdditiveHelix, PartDesign::Helix)
 AdditiveHelix::AdditiveHelix() {
     addSubType = Additive;
+    Outside.setStatus(App::Property::Hidden, true);
 }
 
 PROPERTY_SOURCE(PartDesign::SubtractiveHelix, PartDesign::Helix)
 SubtractiveHelix::SubtractiveHelix() {
     addSubType = Subtractive;
+    Outside.setStatus(App::Property::Hidden, false);
 }
